@@ -54,10 +54,16 @@ class PostmarkAnalyticsProvider {
         let offset = 0;
 
         while (state.eventCount < state.maxEvents) {
-            const response = await this.#client.getBounces(new this.#postmark.BounceFilteringParameters(
-                this.#remainingPageSize(state), offset, undefined, undefined, undefined, undefined, undefined,
-                this.#formatDate(options.begin), this.#formatDate(options.end), this.#config.messageStream || 'broadcast'
-            ));
+            let response;
+            try {
+                response = await this.#client.getBounces(new this.#postmark.BounceFilteringParameters(
+                    this.#remainingPageSize(state), offset, undefined, undefined, undefined, undefined, undefined,
+                    this.#formatDate(options.begin), this.#formatDate(options.end), this.#messageStream
+                ));
+            } catch (err) {
+                debug(`Error fetching bounces at offset ${offset}: ${err.message}`);
+                return;
+            }
             const bounces = response?.Bounces || [];
 
             if (bounces.length === 0) {
@@ -81,11 +87,17 @@ class PostmarkAnalyticsProvider {
         let offset = 0;
 
         while (state.eventCount < state.maxEvents) {
-            const response = await this.#client.getMessageOpens(new this.#postmark.OutboundMessageOpensFilteringParameters(
-                this.#remainingPageSize(state), offset, undefined, undefined, undefined, undefined, undefined,
-                undefined, undefined, undefined, undefined, undefined, undefined, undefined,
-                this.#config.messageStream || 'broadcast'
-            ));
+            let response;
+            try {
+                response = await this.#client.getMessageOpens(new this.#postmark.OutboundMessageOpensFilteringParameters(
+                    this.#remainingPageSize(state), offset, undefined, undefined, undefined, undefined, undefined,
+                    undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+                    this.#messageStream
+                ));
+            } catch (err) {
+                debug(`Error fetching opens at offset ${offset}: ${err.message}`);
+                return;
+            }
             const opens = response?.Opens || [];
 
             if (opens.length === 0) {
@@ -109,11 +121,17 @@ class PostmarkAnalyticsProvider {
         let offset = 0;
 
         while (state.eventCount < state.maxEvents) {
-            const response = await this.#client.getOutboundMessages(new this.#postmark.OutboundMessagesFilteringParameters(
-                this.#remainingPageSize(state), offset, undefined, undefined, undefined, undefined,
-                this.#formatDate(options.begin), this.#formatDate(options.end), undefined,
-                this.#config.messageStream || 'broadcast'
-            ));
+            let response;
+            try {
+                response = await this.#client.getOutboundMessages(new this.#postmark.OutboundMessagesFilteringParameters(
+                    this.#remainingPageSize(state), offset, undefined, undefined, undefined, undefined,
+                    this.#formatDate(options.begin), this.#formatDate(options.end), undefined,
+                    this.#messageStream
+                ));
+            } catch (err) {
+                debug(`Error fetching deliveries at offset ${offset}: ${err.message}`);
+                return;
+            }
             const messages = response?.Messages || [];
 
             if (messages.length === 0) {
@@ -227,12 +245,21 @@ class PostmarkAnalyticsProvider {
             return;
         }
 
-        await batchHandler(page);
+        try {
+            await batchHandler(page);
+        } catch (err) {
+            debug(`batchHandler failed for ${page.length} event(s): ${err.message}`);
+            throw err;
+        }
         state.eventCount += page.length;
     }
 
     #remainingPageSize(state) {
         return Math.min(PAGE_SIZE, state.maxEvents - state.eventCount);
+    }
+
+    get #messageStream() {
+        return this.#config.messageStream || 'broadcast';
     }
 
     #formatDate(date) {
