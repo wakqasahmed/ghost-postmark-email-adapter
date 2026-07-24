@@ -5,6 +5,7 @@ const EmailProviderBase = require('../EmailProviderBase');
 describe('Postmark Email Provider Adapter', function () {
     let PostmarkEmailProvider;
     let postmarkClient;
+    let ServerClientStub;
     let sandbox;
 
     beforeEach(function () {
@@ -16,11 +17,22 @@ describe('Postmark Email Provider Adapter', function () {
                 }));
             })
         };
+        ServerClientStub = sandbox.stub().returns(postmarkClient);
 
         const originalLoad = module.constructor._load;
         sandbox.stub(module.constructor, '_load').callsFake(function (request, parent) {
             if (request === 'postmark') {
-                return {ServerClient: sandbox.stub().returns(postmarkClient)};
+                return {
+                    ServerClient: ServerClientStub,
+                    Models: {
+                        ClientOptions: {
+                            Configuration: function (useHttps, requestHost) {
+                                this.useHttps = useHttps;
+                                this.requestHost = requestHost;
+                            }
+                        }
+                    }
+                };
             }
 
             return originalLoad.apply(this, arguments);
@@ -82,6 +94,24 @@ describe('Postmark Email Provider Adapter', function () {
                     return new PostmarkEmailProvider({postmark: config});
                 }).should.throw(/Postmark adapter requires/);
             });
+        });
+
+        it('uses the default Postmark host when requestHost is not configured', function () {
+            new PostmarkEmailProvider({serverToken: 'server-token', fromEmail: 'news@example.com'});
+
+            ServerClientStub.firstCall.args.should.deepEqual(['server-token', undefined]);
+        });
+
+        it('redirects the client to requestHost over plain HTTP when configured', function () {
+            new PostmarkEmailProvider({
+                serverToken: 'server-token',
+                fromEmail: 'news@example.com',
+                requestHost: '127.0.0.1:2500'
+            });
+
+            const clientOptions = ServerClientStub.firstCall.args[1];
+            clientOptions.useHttps.should.equal(false);
+            clientOptions.requestHost.should.equal('127.0.0.1:2500');
         });
     });
 
