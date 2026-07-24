@@ -31,9 +31,19 @@ class PostmarkEmailProvider extends EmailProviderBase {
             });
         }
 
-        const {ServerClient} = require('postmark');
+        const {ServerClient, Models} = require('postmark');
 
-        this.#client = new ServerClient(postmarkConfig.serverToken);
+        // requestHost is undocumented in this adapter's public config surface - it exists
+        // only so the disposable integration check can redirect the client at a local stub
+        // instead of api.postmarkapp.com. Omitting it preserves default behavior exactly.
+        // Env-var config values are always strings, so a boolean "useHttps" override isn't
+        // exposed here - requestHost always implies plain HTTP, which is the only case this
+        // exists for.
+        const clientOptions = postmarkConfig.requestHost
+            ? new Models.ClientOptions.Configuration(false, postmarkConfig.requestHost)
+            : undefined;
+
+        this.#client = new ServerClient(postmarkConfig.serverToken, clientOptions);
         this.#postmarkConfig = postmarkConfig;
         this.#errorHandler = rootConfig.errorHandler;
     }
