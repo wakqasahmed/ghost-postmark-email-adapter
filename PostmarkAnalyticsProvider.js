@@ -5,7 +5,23 @@ const debug = require('@tryghost/debug')('email-analytics:postmark-adapter');
 
 const PAGE_SIZE = 500;
 const EMAIL_ADDRESS_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
-const TEMPORARY_BOUNCE_TYPES = new Set(['Transient', 'SoftBounce', 'AutoResponder', 'DnsError', 'ChallengeVerification']);
+// Postmark's opens endpoint has no fromdate/todate parameter and its docs cap
+// count+offset at 10,000 total records - unlike bounces/deliveries, it cannot
+// be windowed server-side, only bounded and filtered client-side (#isWithinWindow).
+const MAX_OPENS_OFFSET = 10000;
+// Only these bounce Types represent a message that failed to reach the recipient.
+// Postmark's bounce feed also returns administrative/non-failure records for the
+// same "bounce" concept - Subscribe, AutoResponder (an auto-reply to a delivered
+// message), AddressChange, SpamNotification ("message was delivered, but..."),
+// OpenRelayTest (a probe against the server, no real recipient), VirusNotification,
+// ChallengeVerification (graylisting, not a final outcome), ManuallyDeactivated,
+// Unconfirmed (double opt-in status), and InboundError (inbound routing, unrelated
+// to an outbound recipient) - none of those are delivery failures.
+const FAILURE_BOUNCE_TYPES = new Set([
+    'HardBounce', 'SoftBounce', 'Transient', 'DnsError', 'BadEmailAddress',
+    'Blocked', 'SMTPApiError', 'DMARCPolicy', 'TemplateRenderingFailed', 'Unknown'
+]);
+const TEMPORARY_BOUNCE_TYPES = new Set(['Transient', 'SoftBounce', 'DnsError']);
 
 class PostmarkAnalyticsProvider {
     #client;
@@ -35,9 +51,9 @@ class PostmarkAnalyticsProvider {
         const maxEvents = options.maxEvents ?? Infinity;
         const requestedEvents = options.events || [];
         const shouldFetch = type => requestedEvents.length === 0 || requestedEvents.includes(type);
-        const state = {eventCount: 0, maxEvents};
+        const state = {eventCount: 0, maxEvents, detailsCache: new Map()};
 
-        if (shouldFetch('failed') || shouldFetch('complained')) {
+        if (shouldFetch('failed') || shouldFetch('complained') || shouldFetch('unsubscribed')) {
             await this.#fetchBounces(batchHandler, options, state, shouldFetch);
         }
 
@@ -72,7 +88,7 @@ class PostmarkAnalyticsProvider {
 
             const events = [];
             for (const bounce of bounces) {
-                const event = await this.#mapBounce(bounce);
+                const event = await this.#mapBounce(bounce, options, state);
                 if (event && shouldFetch(event.type)) {
                     events.push(event);
                 }
@@ -86,11 +102,13 @@ class PostmarkAnalyticsProvider {
     async #fetchOpens(batchHandler, options, state) {
         let offset = 0;
 
-        while (state.eventCount < state.maxEvents) {
+        while (state.eventCount < state.maxEvents && offset < MAX_OPENS_OFFSET) {
+            const pageSize = Math.min(this.#remainingPageSize(state), MAX_OPENS_OFFSET - offset);
             let response;
+
             try {
                 response = await this.#client.getMessageOpens(new this.#postmark.OutboundMessageOpensFilteringParameters(
-                    this.#remainingPageSize(state), offset, undefined, undefined, undefined, undefined, undefined,
+                    pageSize, offset, undefined, undefined, undefined, undefined, undefined,
                     undefined, undefined, undefined, undefined, undefined, undefined, undefined,
                     this.#messageStream
                 ));
@@ -106,7 +124,7 @@ class PostmarkAnalyticsProvider {
 
             const events = [];
             for (const open of opens) {
-                const event = await this.#mapEvent(open, 'opened', options);
+                const event = await this.#mapEvent(open, 'opened', options, state);
                 if (event) {
                     events.push(event);
                 }
@@ -114,6 +132,10 @@ class PostmarkAnalyticsProvider {
 
             await this.#handlePage(batchHandler, events, state);
             offset += opens.length;
+        }
+
+        if (offset >= MAX_OPENS_OFFSET) {
+            debug('Reached Postmark\'s 10,000-record opens pagination ceiling (count+offset); some open events may not have been polled this run');
         }
     }
 
@@ -148,7 +170,7 @@ class PostmarkAnalyticsProvider {
                     continue;
                 }
 
-                const details = await this.#client.getOutboundMessageDetails(providerId);
+                const details = await this.#getMessageDetails(providerId, state);
                 for (const delivery of details?.MessageEvents || []) {
                     if (delivery.Type !== 'Delivered') {
                         continue;
@@ -174,16 +196,29 @@ class PostmarkAnalyticsProvider {
         }
     }
 
-    async #mapBounce(bounce) {
+    async #mapBounce(bounce, options, state) {
         if (bounce?.Type === 'SpamComplaint') {
-            const event = await this.#mapEvent(bounce, 'complained');
+            const event = await this.#mapEvent(bounce, 'complained', options, state);
             if (event) {
                 event.id = `bounce:${bounce.ID}`;
             }
             return event;
         }
 
-        const event = await this.#mapEvent(bounce, 'failed');
+        if (bounce?.Type === 'Unsubscribe') {
+            const event = await this.#mapEvent(bounce, 'unsubscribed', options, state);
+            if (event) {
+                event.id = `bounce:${bounce.ID}`;
+            }
+            return event;
+        }
+
+        if (!FAILURE_BOUNCE_TYPES.has(bounce?.Type)) {
+            debug(`Skipping non-failure Postmark bounce type ${bounce?.Type}`);
+            return null;
+        }
+
+        const event = await this.#mapEvent(bounce, 'failed', options, state);
         if (!event) {
             return null;
         }
@@ -197,7 +232,7 @@ class PostmarkAnalyticsProvider {
         return event;
     }
 
-    async #mapEvent(record, type, options = {}) {
+    async #mapEvent(record, type, options = {}, state) {
         const providerId = record?.MessageID;
         const recipientEmail = record?.Recipient || record?.Email;
         const timestamp = record?.ReceivedAt || record?.BouncedAt;
@@ -207,7 +242,7 @@ class PostmarkAnalyticsProvider {
             return null;
         }
 
-        const details = await this.#client.getOutboundMessageDetails(providerId);
+        const details = await this.#getMessageDetails(providerId, state);
         const emailId = details?.Metadata?.['email-id'];
 
         if (!emailId) {
@@ -225,6 +260,16 @@ class PostmarkAnalyticsProvider {
         });
 
         return event && this.#isWithinWindow(event.timestamp, options) ? event : null;
+    }
+
+    async #getMessageDetails(providerId, state) {
+        if (state.detailsCache.has(providerId)) {
+            return state.detailsCache.get(providerId);
+        }
+
+        const details = await this.#client.getOutboundMessageDetails(providerId);
+        state.detailsCache.set(providerId, details);
+        return details;
     }
 
     #createEvent(event) {

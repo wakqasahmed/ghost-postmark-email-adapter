@@ -111,6 +111,50 @@ describe('Postmark Analytics Provider', function () {
         }]);
     });
 
+    it('maps an Unsubscribe bounce record to an unsubscribed event, not failed', async function () {
+        client.getBounces.onFirstCall().resolves({
+            Bounces: [{
+                ID: 3,
+                Type: 'Unsubscribe',
+                MessageID: 'postmark-unsub',
+                Email: 'member@example.com',
+                BouncedAt: '2026-07-22T10:05:00.000Z'
+            }]
+        });
+        client.getBounces.onSecondCall().resolves({Bounces: []});
+        client.getOutboundMessageDetails.withArgs('postmark-unsub').resolves({Metadata: {'email-id': 'ghost-unsub'}});
+        const batchHandler = sinon.stub().resolves();
+
+        await createProvider().fetchLatest(batchHandler, {events: ['unsubscribed']});
+
+        sinon.assert.calledOnceWithExactly(batchHandler, [{
+            id: 'bounce:3',
+            type: 'unsubscribed',
+            emailId: 'ghost-unsub',
+            providerId: 'postmark-unsub',
+            recipientEmail: 'member@example.com',
+            timestamp: new Date('2026-07-22T10:05:00.000Z')
+        }]);
+    });
+
+    it('skips non-failure administrative bounce types instead of reporting them as failed', async function () {
+        client.getBounces.onFirstCall().resolves({
+            Bounces: [
+                {ID: 4, Type: 'AutoResponder', MessageID: 'm4', Email: 'a@example.com', BouncedAt: '2026-07-22T10:06:00.000Z'},
+                {ID: 5, Type: 'Subscribe', MessageID: 'm5', Email: 'b@example.com', BouncedAt: '2026-07-22T10:06:00.000Z'},
+                {ID: 6, Type: 'ChallengeVerification', MessageID: 'm6', Email: 'c@example.com', BouncedAt: '2026-07-22T10:06:00.000Z'},
+                {ID: 7, Type: 'OpenRelayTest', MessageID: 'm7', Email: 'd@example.com', BouncedAt: '2026-07-22T10:06:00.000Z'}
+            ]
+        });
+        client.getBounces.onSecondCall().resolves({Bounces: []});
+        const batchHandler = sinon.stub().resolves();
+
+        await createProvider().fetchLatest(batchHandler, {events: ['failed']});
+
+        batchHandler.called.should.be.false();
+        client.getOutboundMessageDetails.called.should.be.false();
+    });
+
     it('pages opens, resolves metadata, and skips malformed events', async function () {
         emptyResponses();
         client.getMessageOpens.onFirstCall().resolves({
@@ -182,6 +226,48 @@ describe('Postmark Analytics Provider', function () {
             recipientEmail: 'member@example.com',
             timestamp: new Date('2026-07-22T10:04:00.000Z')
         }]);
+    });
+
+    it('stops paging opens at Postmark\'s 10,000-record count+offset ceiling', async function () {
+        emptyResponses();
+        client.getMessageOpens.callsFake(() => Promise.resolve({
+            Opens: Array.from({length: 500}, () => ({MessageID: null}))
+        }));
+        const batchHandler = sinon.stub().resolves();
+
+        await createProvider().fetchLatest(batchHandler, {events: ['opened']});
+
+        client.getMessageOpens.callCount.should.equal(20);
+        client.getMessageOpens.lastCall.args[0].offset.should.equal(9500);
+        client.getMessageOpens.lastCall.args[0].count.should.equal(500);
+    });
+
+    it('caches getOutboundMessageDetails per message within one fetchLatest call', async function () {
+        client.getBounces.onFirstCall().resolves({
+            Bounces: [{
+                ID: 8,
+                Type: 'SpamComplaint',
+                MessageID: 'shared-message',
+                Email: 'member@example.com',
+                BouncedAt: '2026-07-22T10:07:00.000Z'
+            }]
+        });
+        client.getBounces.onSecondCall().resolves({Bounces: []});
+        client.getMessageOpens.onFirstCall().resolves({
+            Opens: [{
+                MessageID: 'shared-message',
+                Recipient: 'member@example.com',
+                ReceivedAt: '2026-07-22T10:08:00.000Z'
+            }]
+        });
+        client.getMessageOpens.onSecondCall().resolves({Opens: []});
+        client.getOutboundMessages.resolves({Messages: []});
+        client.getOutboundMessageDetails.withArgs('shared-message').resolves({Metadata: {'email-id': 'ghost-shared'}});
+        const batchHandler = sinon.stub().resolves();
+
+        await createProvider().fetchLatest(batchHandler, {events: ['complained', 'opened']});
+
+        client.getOutboundMessageDetails.withArgs('shared-message').callCount.should.equal(1);
     });
 
     it('stops when maxEvents is reached', async function () {
