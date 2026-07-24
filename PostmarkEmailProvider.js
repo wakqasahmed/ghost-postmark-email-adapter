@@ -121,7 +121,7 @@ class PostmarkEmailProvider extends EmailProviderBase {
             MessageStream: this.#postmarkConfig.messageStream || 'broadcast',
             TrackOpens: !!options.openTrackingEnabled,
             TrackLinks: options.clickTrackingEnabled ? 'HtmlAndText' : 'None',
-            Metadata: {'email-id': data.emailId || 'unknown'}
+            Metadata: {'email-id': String(data.emailId || 'unknown')}
         };
 
         if (data.replyTo) {
@@ -205,6 +205,18 @@ class PostmarkEmailProvider extends EmailProviderBase {
         });
     }
 
+    #notifyErrorHandler(ghostError) {
+        if (this.#errorHandler) {
+            try {
+                Promise.resolve(this.#errorHandler(ghostError)).catch(function (handlerError) {
+                    debug(`errorHandler rejected: ${handlerError?.message}`);
+                });
+            } catch (handlerError) {
+                debug(`errorHandler threw: ${handlerError?.message}`);
+            }
+        }
+    }
+
     async #send(data, options, retryKey) {
         const recipients = data.recipients || [];
         const replacementDefinitions = data.replacementDefinitions || [];
@@ -213,45 +225,44 @@ class PostmarkEmailProvider extends EmailProviderBase {
             return !successfulRecipients.has(recipient.email);
         });
         let firstMessageId;
+        const failures = [];
 
-        try {
-            for (const batch of this.#chunkArray(pendingRecipients)) {
-                const results = await this.#client.sendEmailBatch(batch.map((recipient) => {
+        // Every chunk is attempted even after an earlier chunk fails, so one bad
+        // recipient (or one failed batch call) never silently skips the rest of a
+        // large send - mirrors SESEmailProvider's Promise.allSettled-per-batch approach.
+        for (const batch of this.#chunkArray(pendingRecipients)) {
+            let results;
+
+            try {
+                results = await this.#client.sendEmailBatch(batch.map((recipient) => {
                     return this.#buildMessage(data, options, recipient, replacementDefinitions);
                 }));
-                const failures = [];
-
-                results.forEach(function (result, index) {
-                    if (result.ErrorCode === 0) {
-                        successfulRecipients.add(batch[index].email);
-                        firstMessageId = firstMessageId || result.MessageID;
-                    } else {
-                        failures.push(result);
-                    }
-                });
-
-                if (failures.length > 0) {
-                    const error = new Error(failures.map(function (failure) {
-                        return failure.Message || `Postmark error ${failure.ErrorCode}`;
-                    }).join('; '));
-                    error.code = failures[0].ErrorCode;
-                    throw error;
-                }
+            } catch (error) {
+                failures.push({message: error.message, code: error.code});
+                continue;
             }
-        } catch (error) {
+
+            results.forEach(function (result, index) {
+                if (result.ErrorCode === 0) {
+                    successfulRecipients.add(batch[index].email);
+                    firstMessageId = firstMessageId || result.MessageID;
+                } else {
+                    failures.push({message: result.Message || `Postmark error ${result.ErrorCode}`, code: result.ErrorCode});
+                }
+            });
+        }
+
+        if (failures.length > 0) {
             this.#rememberSuccessfulRecipients(retryKey, successfulRecipients);
+
+            const error = new Error(failures.map(failure => failure.message).join('; '));
+            error.code = failures[0].code;
+            // Per-recipient content/address rejections are a client-side condition, not a
+            // Postmark outage - distinguish them from the createError() default of 500.
+            error.statusCode = 400;
+
             const ghostError = this.#createError(error, recipients);
-
-            if (this.#errorHandler) {
-                try {
-                    Promise.resolve(this.#errorHandler(ghostError)).catch(function (handlerError) {
-                        debug(`errorHandler rejected: ${handlerError?.message}`);
-                    });
-                } catch (handlerError) {
-                    debug(`errorHandler threw: ${handlerError?.message}`);
-                }
-            }
-
+            this.#notifyErrorHandler(ghostError);
             throw ghostError;
         }
 

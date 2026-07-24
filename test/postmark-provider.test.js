@@ -170,6 +170,56 @@ describe('Postmark Email Provider Adapter', function () {
                 return message.To;
             }).should.deepEqual(['private.member@example.com']);
         });
+
+        it('attempts every chunk even when an earlier chunk has failures', async function () {
+            const adapter = createAdapter();
+            const recipients = Array.from({length: 1200}, function (_, index) {
+                return {email: `member${index}@example.com`};
+            });
+
+            postmarkClient.sendEmailBatch.onFirstCall().resolves([
+                {ErrorCode: 406, Message: 'Inactive member0@example.com'},
+                ...Array.from({length: 499}, (_, index) => ({ErrorCode: 0, MessageID: `chunk1-${index}`}))
+            ]);
+            postmarkClient.sendEmailBatch.onSecondCall().resolves(
+                Array.from({length: 500}, (_, index) => ({ErrorCode: 0, MessageID: `chunk2-${index}`}))
+            );
+            postmarkClient.sendEmailBatch.onThirdCall().resolves(
+                Array.from({length: 200}, (_, index) => ({ErrorCode: 0, MessageID: `chunk3-${index}`}))
+            );
+
+            try {
+                await adapter.send(createEmailData(recipients), {});
+                throw new Error('Expected EmailError');
+            } catch (err) {
+                err.name.should.equal('EmailError');
+                err.statusCode.should.equal(400);
+            }
+
+            postmarkClient.sendEmailBatch.callCount.should.equal(3);
+        });
+
+        it('reports a whole-chunk invoke failure as a 400 without skipping later chunks', async function () {
+            const adapter = createAdapter();
+            const recipients = Array.from({length: 600}, function (_, index) {
+                return {email: `member${index}@example.com`};
+            });
+
+            postmarkClient.sendEmailBatch.onFirstCall().rejects(new Error('Postmark API unavailable'));
+            postmarkClient.sendEmailBatch.onSecondCall().resolves([
+                {ErrorCode: 0, MessageID: 'chunk2-0'}
+            ]);
+
+            try {
+                await adapter.send(createEmailData(recipients), {});
+                throw new Error('Expected EmailError');
+            } catch (err) {
+                err.name.should.equal('EmailError');
+                err.message.should.containEql('Postmark API unavailable');
+            }
+
+            postmarkClient.sendEmailBatch.callCount.should.equal(2);
+        });
     });
 
     describe('provider limits', function () {
