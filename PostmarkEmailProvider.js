@@ -244,8 +244,11 @@ class PostmarkEmailProvider extends EmailProviderBase {
 
             if (this.#errorHandler) {
                 try {
-                    Promise.resolve(this.#errorHandler(ghostError)).catch(function () {});
+                    Promise.resolve(this.#errorHandler(ghostError)).catch(function (handlerError) {
+                        debug(`errorHandler rejected: ${handlerError?.message}`);
+                    });
                 } catch (handlerError) {
+                    debug(`errorHandler threw: ${handlerError?.message}`);
                 }
             }
 
