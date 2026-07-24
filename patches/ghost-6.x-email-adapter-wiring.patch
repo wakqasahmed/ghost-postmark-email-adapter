@@ -1,0 +1,88 @@
+# Ghost email adapter wiring patch
+#
+# Target runtime: ghost:6-alpine, embedded Ghost v6.53.0
+# Apply from /var/lib/ghost/current with one command:
+#   git apply /path/to/ghost-6.x-email-adapter-wiring.patch
+
+diff --git a/core/server/adapters/email/email-provider-base.js b/core/server/adapters/email/email-provider-base.js
+new file mode 100644
+--- /dev/null
++++ b/core/server/adapters/email/email-provider-base.js
+@@ -0,0 +1,21 @@
++'use strict';
++
++const errors = require('@tryghost/errors');
++
++class EmailProviderBase {
++    constructor(config) {
++        Object.defineProperty(this, 'requiredFns', {
++            value: ['send'],
++            writable: false
++        });
++
++        this.config = config || {};
++    }
++
++    async send() {
++        throw new errors.IncorrectUsageError({
++            message: 'send() must be implemented by email provider adapter'
++        });
++    }
++}
++module.exports = EmailProviderBase;
+diff --git a/core/server/services/adapter-manager/index.js b/core/server/services/adapter-manager/index.js
+--- a/core/server/services/adapter-manager/index.js
++++ b/core/server/services/adapter-manager/index.js
+@@ -9,6 +9,7 @@ const adapter_base_sso_1 = require("@tryghost/adapter-base-sso");
+ const adapter_base_cache_1 = __importDefault(require("@tryghost/adapter-base-cache"));
+ const adapter_base_redirects_1 = require("@tryghost/adapter-base-redirects");
+ const adapter_base_route_settings_1 = require("@tryghost/adapter-base-route-settings");
++const email_provider_base_1 = require("../../adapters/email/email-provider-base");
+ const adapter_manager_1 = require("./adapter-manager");
+ const config_1 = __importDefault(require("../../../shared/config"));
+ // A singleton adapter manager, preconfigured with the base classes for every
+@@ -27,6 +28,7 @@ const adapterManager = new adapter_manager_1.AdapterManager({
+         scheduling: adapter_base_scheduling_1.SchedulingBase,
+         sso: adapter_base_sso_1.SSOBase,
+         cache: adapter_base_cache_1.default,
++        email: email_provider_base_1,
+         redirects: adapter_base_redirects_1.RedirectsStoreBase,
+         'route-settings': adapter_base_route_settings_1.RouteSettingsStoreBase
+     }
+diff --git a/core/server/services/email-service/email-service-wrapper.js b/core/server/services/email-service/email-service-wrapper.js
+--- a/core/server/services/email-service/email-service-wrapper.js
++++ b/core/server/services/email-service/email-service-wrapper.js
+@@ -22,6 +22,7 @@ class EmailServiceWrapper {
+         const BatchSendingService = require('./batch-sending-service');
+         const EmailSegmenter = require('./email-segmenter');
+         const MailgunEmailProvider = require('./mailgun-email-provider');
++        const adapterManager = require('../adapter-manager');
+         const {DomainWarmingService} = require('./domain-warming-service');
+ 
+         const {Post, Newsletter, Email, EmailBatch, EmailRecipient, Member} = require('../../models');
+@@ -68,10 +69,12 @@ class EmailServiceWrapper {
+             i18n.changeLanguage(model.get('value'));
+         });
+ 
+-        const mailgunEmailProvider = new MailgunEmailProvider({
+-            mailgunClient,
+-            errorHandler
+-        });
++        const emailProvider = configService.get('adapters:email')
++            ? adapterManager.getAdapter('email')
++            : new MailgunEmailProvider({
++                mailgunClient,
++                errorHandler
++            });
+ 
+         const emailRenderer = new EmailRenderer({
+             settingsCache,
+@@ -97,7 +100,7 @@ class EmailServiceWrapper {
+         });
+ 
+         const sendingService = new SendingService({
+-            emailProvider: mailgunEmailProvider,
++            emailProvider,
+             emailRenderer,
+             emailAddressService: emailAddressService.service
+         });
