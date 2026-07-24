@@ -151,6 +151,24 @@ describe('Postmark Email Provider Adapter', function () {
             }]);
         });
 
+        it('sends both batches when two concurrent sends share the same emailId but have different recipients', async function () {
+            const adapter = createAdapter();
+            const dataA = createEmailData([{email: 'a1@example.com'}, {email: 'a2@example.com'}]);
+            const dataB = createEmailData([{email: 'b1@example.com'}, {email: 'b2@example.com'}]);
+
+            await Promise.all([
+                adapter.send(dataA, {}),
+                adapter.send(dataB, {})
+            ]);
+
+            postmarkClient.sendEmailBatch.callCount.should.equal(2);
+
+            const sentTo = postmarkClient.sendEmailBatch.getCalls()
+                .map(call => call.args[0].map(message => message.To))
+                .flat();
+            sentTo.should.containDeep(['a1@example.com', 'a2@example.com', 'b1@example.com', 'b2@example.com']);
+        });
+
         it('chunks batch sends at 500 recipients and uses default broadcast stream', async function () {
             const adapter = createAdapter();
             const recipients = Array.from({length: 501}, function (_, index) {
