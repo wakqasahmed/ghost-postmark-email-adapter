@@ -60,7 +60,7 @@ docker run --detach --name "$container_name" \
 for _ in $(seq 1 60); do
     if docker logs "$container_name" 2>&1 | grep -q 'Ghost is running'; then
         if docker exec -i "$container_name" node - <<'NODE'
-const adapterManager = require('/var/lib/ghost/current/core/server/services/adapter-manager');
+const adapterManager = require('/var/lib/ghost/current/core/server/services/adapter-manager').default;
 const fs = require('fs');
 
 async function main() {
