@@ -8,6 +8,7 @@
     "EmailProviderBase.js",
     "PostmarkEmailProvider.js",
     "PostmarkAnalyticsProvider.js",
+    "PostmarkSuppressionProvider.js",
     "patches",
     "LICENSE",
     "README.md"
