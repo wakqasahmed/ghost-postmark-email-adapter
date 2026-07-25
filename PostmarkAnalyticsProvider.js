@@ -67,11 +67,23 @@ class PostmarkAnalyticsProvider {
         }
     }
 
+    // Postmark's list endpoints return newest-first (undocumented, but the common
+    // convention, and issue #17 tracks confirming it against the live API). Ghost's
+    // analytics batch processor advances its polling cursor to the *maximum*
+    // timestamp seen in a processed batch. If a truncated page (maxEvents, or the
+    // pagination ceiling) were dispatched in whatever order the API returned it, the
+    // cursor would jump past older, not-yet-seen events, permanently skipping them -
+    // Postmark has no way to ask for "events before X that I haven't seen". So each
+    // fetch method below collects every matching event across all of its pages first,
+    // sorts oldest-first, and only then dispatches - a truncated batch always
+    // contains the oldest unprocessed events, regardless of the API's actual order.
+
     async #fetchBounces(batchHandler, options, state, shouldFetch) {
         let offset = 0;
+        const collectedEvents = [];
 
-        while (state.eventCount < state.maxEvents && offset < MAX_PAGINATION_OFFSET) {
-            const pageSize = Math.min(this.#remainingPageSize(state), MAX_PAGINATION_OFFSET - offset);
+        while (offset < MAX_PAGINATION_OFFSET && state.eventCount + collectedEvents.length < state.maxEvents) {
+            const pageSize = Math.min(PAGE_SIZE, state.maxEvents - state.eventCount - collectedEvents.length, MAX_PAGINATION_OFFSET - offset);
             let response;
 
             try {
@@ -81,36 +93,37 @@ class PostmarkAnalyticsProvider {
                 ));
             } catch (err) {
                 debug(`Error fetching bounces at offset ${offset}: ${err.message}`);
-                return;
+                break;
             }
             const bounces = response?.Bounces || [];
 
             if (bounces.length === 0) {
-                return;
+                break;
             }
 
-            const events = [];
             for (const bounce of bounces) {
                 const event = await this.#mapBounce(bounce, options, state);
                 if (event && shouldFetch(event.type)) {
-                    events.push(event);
+                    collectedEvents.push(event);
                 }
             }
 
-            await this.#handlePage(batchHandler, events, state);
             offset += bounces.length;
         }
 
         if (offset >= MAX_PAGINATION_OFFSET) {
             debug('Reached Postmark\'s 10,000-record bounce pagination ceiling (count+offset); some bounce events may not have been polled this run');
         }
+
+        await this.#handlePage(batchHandler, this.#sortByTimestamp(collectedEvents), state);
     }
 
     async #fetchOpens(batchHandler, options, state) {
         let offset = 0;
+        const collectedEvents = [];
 
-        while (state.eventCount < state.maxEvents && offset < MAX_PAGINATION_OFFSET) {
-            const pageSize = Math.min(this.#remainingPageSize(state), MAX_PAGINATION_OFFSET - offset);
+        while (offset < MAX_PAGINATION_OFFSET && state.eventCount + collectedEvents.length < state.maxEvents) {
+            const pageSize = Math.min(PAGE_SIZE, state.maxEvents - state.eventCount - collectedEvents.length, MAX_PAGINATION_OFFSET - offset);
             let response;
 
             try {
@@ -121,36 +134,37 @@ class PostmarkAnalyticsProvider {
                 ));
             } catch (err) {
                 debug(`Error fetching opens at offset ${offset}: ${err.message}`);
-                return;
+                break;
             }
             const opens = response?.Opens || [];
 
             if (opens.length === 0) {
-                return;
+                break;
             }
 
-            const events = [];
             for (const open of opens) {
                 const event = await this.#mapEvent(open, 'opened', options, state);
                 if (event) {
-                    events.push(event);
+                    collectedEvents.push(event);
                 }
             }
 
-            await this.#handlePage(batchHandler, events, state);
             offset += opens.length;
         }
 
         if (offset >= MAX_PAGINATION_OFFSET) {
             debug('Reached Postmark\'s 10,000-record opens pagination ceiling (count+offset); some open events may not have been polled this run');
         }
+
+        await this.#handlePage(batchHandler, this.#sortByTimestamp(collectedEvents), state);
     }
 
     async #fetchDeliveries(batchHandler, options, state) {
         let offset = 0;
+        const collectedEvents = [];
 
-        while (state.eventCount < state.maxEvents && offset < MAX_PAGINATION_OFFSET) {
-            const pageSize = Math.min(this.#remainingPageSize(state), MAX_PAGINATION_OFFSET - offset);
+        while (offset < MAX_PAGINATION_OFFSET && state.eventCount + collectedEvents.length < state.maxEvents) {
+            const pageSize = Math.min(PAGE_SIZE, state.maxEvents - state.eventCount - collectedEvents.length, MAX_PAGINATION_OFFSET - offset);
             let response;
 
             try {
@@ -161,15 +175,14 @@ class PostmarkAnalyticsProvider {
                 ));
             } catch (err) {
                 debug(`Error fetching deliveries at offset ${offset}: ${err.message}`);
-                return;
+                break;
             }
             const messages = response?.Messages || [];
 
             if (messages.length === 0) {
-                return;
+                break;
             }
 
-            const events = [];
             for (const message of messages) {
                 const emailId = message?.Metadata?.['email-id'];
                 const providerId = message?.MessageID;
@@ -195,18 +208,23 @@ class PostmarkAnalyticsProvider {
                     });
 
                     if (event && this.#isWithinWindow(event.timestamp, options)) {
-                        events.push(event);
+                        collectedEvents.push(event);
                     }
                 }
             }
 
-            await this.#handlePage(batchHandler, events, state);
             offset += messages.length;
         }
 
         if (offset >= MAX_PAGINATION_OFFSET) {
             debug('Reached Postmark\'s 10,000-record outbound-messages pagination ceiling (count+offset); some delivered events may not have been polled this run');
         }
+
+        await this.#handlePage(batchHandler, this.#sortByTimestamp(collectedEvents), state);
+    }
+
+    #sortByTimestamp(events) {
+        return [...events].sort((a, b) => a.timestamp - b.timestamp);
     }
 
     async #mapBounce(bounce, options, state) {
@@ -310,10 +328,6 @@ class PostmarkAnalyticsProvider {
             throw err;
         }
         state.eventCount += page.length;
-    }
-
-    #remainingPageSize(state) {
-        return Math.min(PAGE_SIZE, state.maxEvents - state.eventCount);
     }
 
     get #messageStream() {

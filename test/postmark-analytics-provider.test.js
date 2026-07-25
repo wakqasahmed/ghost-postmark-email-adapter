@@ -111,6 +111,42 @@ describe('Postmark Analytics Provider', function () {
         }]);
     });
 
+    it('dispatches events oldest-first even when Postmark returns pages newest-first', async function () {
+        // Simulates Postmark's real (undocumented but conventional) newest-first
+        // page order: the first page fetched contains the newer events, the second
+        // (older) page is fetched next since maxEvents is unbounded.
+        client.getBounces.onFirstCall().resolves({
+            Bounces: [{
+                ID: 10,
+                Type: 'HardBounce',
+                MessageID: 'newer-bounce',
+                Email: 'newer@example.com',
+                BouncedAt: '2026-07-22T12:00:00.000Z'
+            }]
+        });
+        client.getBounces.onSecondCall().resolves({
+            Bounces: [{
+                ID: 11,
+                Type: 'HardBounce',
+                MessageID: 'older-bounce',
+                Email: 'older@example.com',
+                BouncedAt: '2026-07-22T08:00:00.000Z'
+            }]
+        });
+        client.getBounces.onThirdCall().resolves({Bounces: []});
+        client.getOutboundMessageDetails.withArgs('newer-bounce').resolves({Metadata: {'email-id': 'ghost-newer'}});
+        client.getOutboundMessageDetails.withArgs('older-bounce').resolves({Metadata: {'email-id': 'ghost-older'}});
+        client.getMessageOpens.resolves({Opens: []});
+        client.getOutboundMessages.resolves({Messages: []});
+        const batchHandler = sinon.stub().resolves();
+
+        await createProvider().fetchLatest(batchHandler, {events: ['failed']});
+
+        sinon.assert.calledOnce(batchHandler);
+        const dispatchedEvents = batchHandler.firstCall.args[0];
+        dispatchedEvents.map(event => event.emailId).should.deepEqual(['ghost-older', 'ghost-newer']);
+    });
+
     it('maps an Unsubscribe bounce record to an unsubscribed event, not failed', async function () {
         client.getBounces.onFirstCall().resolves({
             Bounces: [{
