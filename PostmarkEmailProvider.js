@@ -318,7 +318,12 @@ class PostmarkEmailProvider extends EmailProviderBase {
     }
 
     getTargetDeliveryWindow() {
-        return 3600;
+        // Ghost core treats this as milliseconds and uses it to spread batches
+        // across a delivery window (see batch-sending-service.js). This adapter
+        // sends immediately and cannot honor a delivery-time hint, so return 0
+        // to skip Ghost's windowing/spreading logic entirely (Ghost treats
+        // targetDeliveryWindow <= 0 as "no deadline").
+        return 0;
     }
 }
 

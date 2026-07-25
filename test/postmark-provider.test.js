@@ -271,11 +271,11 @@ describe('Postmark Email Provider Adapter', function () {
     });
 
     describe('provider limits', function () {
-        it('reports Postmark batch capacity and an hour delivery window', function () {
+        it('reports Postmark batch capacity and no delivery window', function () {
             const adapter = createAdapter();
 
             adapter.getMaximumRecipients().should.equal(500);
-            adapter.getTargetDeliveryWindow().should.equal(3600);
+            adapter.getTargetDeliveryWindow().should.equal(0);
         });
     });
 });
