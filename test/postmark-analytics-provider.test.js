@@ -350,6 +350,68 @@ describe('Postmark Analytics Provider', function () {
         client.getOutboundMessageDetails.withArgs('shared-message').callCount.should.equal(1);
     });
 
+    it('logs a warning and continues polling other event types when a list fetch fails', async function () {
+        emptyResponses();
+        client.getBounces.rejects(new Error('401 Unauthorized'));
+        client.getMessageOpens.onFirstCall().resolves({
+            Opens: [{
+                MessageID: 'postmark-open',
+                Recipient: 'member@example.com',
+                ReceivedAt: '2026-07-22T10:00:00.000Z'
+            }]
+        });
+        client.getMessageOpens.onSecondCall().resolves({Opens: []});
+        client.getOutboundMessageDetails.withArgs('postmark-open').resolves({Metadata: {'email-id': 'ghost-open'}});
+        const batchHandler = sinon.stub().resolves();
+        const consoleError = sandbox.stub(console, 'error');
+
+        await createProvider().fetchLatest(batchHandler, {events: ['failed', 'opened']});
+
+        client.getBounces.callCount.should.equal(1);
+        sinon.assert.calledOnce(batchHandler);
+        batchHandler.firstCall.args[0].should.have.length(1);
+        batchHandler.firstCall.args[0][0].type.should.equal('opened');
+        batchHandler.firstCall.args[0][0].providerId.should.equal('postmark-open');
+        consoleError.calledOnce.should.be.true();
+        consoleError.firstCall.args[0].should.match(/Error fetching bounces.*401 Unauthorized/);
+    });
+
+    it('logs a warning and skips just the affected event when a message-details lookup fails, without aborting the poll', async function () {
+        client.getBounces.onFirstCall().resolves({
+            Bounces: [{
+                ID: 1,
+                Type: 'HardBounce',
+                TypeCode: 1,
+                MessageID: 'failing-details',
+                Email: 'first@example.com',
+                BouncedAt: '2026-07-22T10:00:00.000Z'
+            }, {
+                ID: 2,
+                Type: 'HardBounce',
+                TypeCode: 1,
+                MessageID: 'postmark-bounce',
+                Email: 'second@example.com',
+                BouncedAt: '2026-07-22T10:01:00.000Z'
+            }]
+        });
+        client.getBounces.onSecondCall().resolves({Bounces: []});
+        client.getMessageOpens.resolves({Opens: []});
+        client.getOutboundMessages.resolves({Messages: []});
+        client.getOutboundMessageDetails.withArgs('failing-details').rejects(new Error('404 Not Found'));
+        client.getOutboundMessageDetails.withArgs('postmark-bounce').resolves({Metadata: {'email-id': 'ghost-bounce'}});
+        const batchHandler = sinon.stub().resolves();
+        const consoleError = sandbox.stub(console, 'error');
+
+        await createProvider().fetchLatest(batchHandler, {events: ['failed', 'opened', 'delivered']});
+
+        sinon.assert.calledOnce(batchHandler);
+        batchHandler.firstCall.args[0].should.have.length(1);
+        batchHandler.firstCall.args[0][0].providerId.should.equal('postmark-bounce');
+        client.getOutboundMessages.called.should.be.true();
+        consoleError.calledOnce.should.be.true();
+        consoleError.firstCall.args[0].should.match(/Error fetching Postmark message details for failing-details.*404 Not Found/);
+    });
+
     it('stops when maxEvents is reached', async function () {
         client.getBounces.resolves({
             Bounces: [{
