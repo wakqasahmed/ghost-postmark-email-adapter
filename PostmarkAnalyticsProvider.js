@@ -5,10 +5,11 @@ const debug = require('@tryghost/debug')('email-analytics:postmark-adapter');
 
 const PAGE_SIZE = 500;
 const EMAIL_ADDRESS_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
-// Postmark's opens endpoint has no fromdate/todate parameter and its docs cap
-// count+offset at 10,000 total records - unlike bounces/deliveries, it cannot
-// be windowed server-side, only bounded and filtered client-side (#isWithinWindow).
-const MAX_OPENS_OFFSET = 10000;
+// Postmark's Bounce API, Messages API, and opens endpoint all cap count+offset at
+// 10,000 total records (verified against postmarkapp.com/developer docs for each).
+// Opens additionally has no fromdate/todate parameter, so it can't be windowed
+// server-side at all - only bounded and filtered client-side (#isWithinWindow).
+const MAX_PAGINATION_OFFSET = 10000;
 // Only these bounce Types represent a message that failed to reach the recipient.
 // Postmark's bounce feed also returns administrative/non-failure records for the
 // same "bounce" concept - Subscribe, AutoResponder (an auto-reply to a delivered
@@ -69,11 +70,13 @@ class PostmarkAnalyticsProvider {
     async #fetchBounces(batchHandler, options, state, shouldFetch) {
         let offset = 0;
 
-        while (state.eventCount < state.maxEvents) {
+        while (state.eventCount < state.maxEvents && offset < MAX_PAGINATION_OFFSET) {
+            const pageSize = Math.min(this.#remainingPageSize(state), MAX_PAGINATION_OFFSET - offset);
             let response;
+
             try {
                 response = await this.#client.getBounces(new this.#postmark.BounceFilteringParameters(
-                    this.#remainingPageSize(state), offset, undefined, undefined, undefined, undefined, undefined,
+                    pageSize, offset, undefined, undefined, undefined, undefined, undefined,
                     this.#formatDate(options.begin), this.#formatDate(options.end), this.#messageStream
                 ));
             } catch (err) {
@@ -97,13 +100,17 @@ class PostmarkAnalyticsProvider {
             await this.#handlePage(batchHandler, events, state);
             offset += bounces.length;
         }
+
+        if (offset >= MAX_PAGINATION_OFFSET) {
+            debug('Reached Postmark\'s 10,000-record bounce pagination ceiling (count+offset); some bounce events may not have been polled this run');
+        }
     }
 
     async #fetchOpens(batchHandler, options, state) {
         let offset = 0;
 
-        while (state.eventCount < state.maxEvents && offset < MAX_OPENS_OFFSET) {
-            const pageSize = Math.min(this.#remainingPageSize(state), MAX_OPENS_OFFSET - offset);
+        while (state.eventCount < state.maxEvents && offset < MAX_PAGINATION_OFFSET) {
+            const pageSize = Math.min(this.#remainingPageSize(state), MAX_PAGINATION_OFFSET - offset);
             let response;
 
             try {
@@ -134,7 +141,7 @@ class PostmarkAnalyticsProvider {
             offset += opens.length;
         }
 
-        if (offset >= MAX_OPENS_OFFSET) {
+        if (offset >= MAX_PAGINATION_OFFSET) {
             debug('Reached Postmark\'s 10,000-record opens pagination ceiling (count+offset); some open events may not have been polled this run');
         }
     }
@@ -142,11 +149,13 @@ class PostmarkAnalyticsProvider {
     async #fetchDeliveries(batchHandler, options, state) {
         let offset = 0;
 
-        while (state.eventCount < state.maxEvents) {
+        while (state.eventCount < state.maxEvents && offset < MAX_PAGINATION_OFFSET) {
+            const pageSize = Math.min(this.#remainingPageSize(state), MAX_PAGINATION_OFFSET - offset);
             let response;
+
             try {
                 response = await this.#client.getOutboundMessages(new this.#postmark.OutboundMessagesFilteringParameters(
-                    this.#remainingPageSize(state), offset, undefined, undefined, undefined, undefined,
+                    pageSize, offset, undefined, undefined, undefined, undefined,
                     this.#formatDate(options.begin), this.#formatDate(options.end), undefined,
                     this.#messageStream
                 ));
@@ -193,6 +202,10 @@ class PostmarkAnalyticsProvider {
 
             await this.#handlePage(batchHandler, events, state);
             offset += messages.length;
+        }
+
+        if (offset >= MAX_PAGINATION_OFFSET) {
+            debug('Reached Postmark\'s 10,000-record outbound-messages pagination ceiling (count+offset); some delivered events may not have been polled this run');
         }
     }
 

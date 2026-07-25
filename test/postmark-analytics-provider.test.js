@@ -242,6 +242,34 @@ describe('Postmark Analytics Provider', function () {
         client.getMessageOpens.lastCall.args[0].count.should.equal(500);
     });
 
+    it('stops paging bounces at Postmark\'s 10,000-record count+offset ceiling', async function () {
+        emptyResponses();
+        client.getBounces.callsFake(() => Promise.resolve({
+            Bounces: Array.from({length: 500}, () => ({Type: 'AutoResponder'}))
+        }));
+        const batchHandler = sinon.stub().resolves();
+
+        await createProvider().fetchLatest(batchHandler, {events: ['failed']});
+
+        client.getBounces.callCount.should.equal(20);
+        client.getBounces.lastCall.args[0].offset.should.equal(9500);
+        client.getBounces.lastCall.args[0].count.should.equal(500);
+    });
+
+    it('stops paging deliveries at Postmark\'s 10,000-record count+offset ceiling', async function () {
+        emptyResponses();
+        client.getOutboundMessages.callsFake(() => Promise.resolve({
+            Messages: Array.from({length: 500}, () => ({MessageID: null}))
+        }));
+        const batchHandler = sinon.stub().resolves();
+
+        await createProvider().fetchLatest(batchHandler, {events: ['delivered']});
+
+        client.getOutboundMessages.callCount.should.equal(20);
+        client.getOutboundMessages.lastCall.args[0].offset.should.equal(9500);
+        client.getOutboundMessages.lastCall.args[0].count.should.equal(500);
+    });
+
     it('caches getOutboundMessageDetails per message within one fetchLatest call', async function () {
         client.getBounces.onFirstCall().resolves({
             Bounces: [{
