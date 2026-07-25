@@ -92,7 +92,7 @@ class PostmarkAnalyticsProvider {
                     this.#formatDate(options.begin), this.#formatDate(options.end), this.#messageStream
                 ));
             } catch (err) {
-                debug(`Error fetching bounces at offset ${offset}: ${err.message}`);
+                this.#logWarning(`Error fetching bounces at offset ${offset}: ${err.message}`);
                 break;
             }
             const bounces = response?.Bounces || [];
@@ -133,7 +133,7 @@ class PostmarkAnalyticsProvider {
                     this.#messageStream
                 ));
             } catch (err) {
-                debug(`Error fetching opens at offset ${offset}: ${err.message}`);
+                this.#logWarning(`Error fetching opens at offset ${offset}: ${err.message}`);
                 break;
             }
             const opens = response?.Opens || [];
@@ -174,7 +174,7 @@ class PostmarkAnalyticsProvider {
                     this.#messageStream
                 ));
             } catch (err) {
-                debug(`Error fetching deliveries at offset ${offset}: ${err.message}`);
+                this.#logWarning(`Error fetching deliveries at offset ${offset}: ${err.message}`);
                 break;
             }
             const messages = response?.Messages || [];
@@ -298,7 +298,20 @@ class PostmarkAnalyticsProvider {
             return state.detailsCache.get(providerId);
         }
 
-        const details = await this.#client.getOutboundMessageDetails(providerId);
+        let details;
+
+        try {
+            details = await this.#client.getOutboundMessageDetails(providerId);
+        } catch (err) {
+            // A single failed details lookup (404 for an aged-out message, mid-poll 429, ...)
+            // must not abort the whole fetchLatest() poll - other already-collected events in
+            // this same page would be discarded, and any category not yet fetched this poll
+            // would never run. Skip just this message: callers already treat a missing/undefined
+            // `details` as "no email-id metadata" and drop the event.
+            this.#logWarning(`Error fetching Postmark message details for ${providerId}: ${err.message}`);
+            details = undefined;
+        }
+
         state.detailsCache.set(providerId, details);
         return details;
     }
@@ -328,6 +341,15 @@ class PostmarkAnalyticsProvider {
             throw err;
         }
         state.eventCount += page.length;
+    }
+
+    // debug() output is invisible unless DEBUG=email-analytics:postmark-adapter is set, so a
+    // silently-failing list fetch (e.g. an expired serverToken returning 401 forever) or a
+    // failing per-message details lookup would otherwise go completely unnoticed by operators.
+    // Log both failure classes at a level visible without DEBUG, matching the skip-and-continue
+    // policy applied to both: neither failure class aborts the poll, but both must be seen.
+    #logWarning(message) {
+        console.error(`[ghost-postmark-email-adapter] ${message}`);
     }
 
     get #messageStream() {
