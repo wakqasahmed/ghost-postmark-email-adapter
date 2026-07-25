@@ -334,8 +334,37 @@ class PostmarkAnalyticsProvider {
         return this.#config.messageStream || 'broadcast';
     }
 
+    // Postmark's fromdate/todate parameters are documented as Eastern Time with the
+    // example format YYYY-MM-DDT12:00:00 - a naive local timestamp, not UTC. The
+    // previous implementation sent date.toISOString() (UTC, Z-suffixed), which does
+    // not match that format; if Postmark parsed it as a naive Eastern timestamp
+    // rather than rejecting it, the server-side filter window would have been
+    // shifted by 4-5 hours (the EST/EDT offset). Converts to Eastern Time using the
+    // IANA tz database (DST-aware) rather than a fixed offset.
     #formatDate(date) {
-        return date instanceof Date ? date.toISOString() : date;
+        if (!date) {
+            return date;
+        }
+
+        const parsedDate = date instanceof Date ? date : new Date(date);
+
+        if (Number.isNaN(parsedDate.getTime())) {
+            return date;
+        }
+
+        const parts = new Intl.DateTimeFormat('en-US', {
+            timeZone: 'America/New_York',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hourCycle: 'h23'
+        }).formatToParts(parsedDate);
+        const part = type => parts.find(entry => entry.type === type).value;
+
+        return `${part('year')}-${part('month')}-${part('day')}T${part('hour')}:${part('minute')}:${part('second')}`;
     }
 
     #isWithinWindow(timestamp, options) {
