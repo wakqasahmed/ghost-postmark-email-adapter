@@ -111,6 +111,22 @@ describe('Postmark Analytics Provider', function () {
         }]);
     });
 
+    it('sends fromdate/todate as naive Eastern Time, not UTC, per Postmark\'s documented format', async function () {
+        emptyResponses();
+        const batchHandler = sinon.stub().resolves();
+
+        await createProvider().fetchLatest(batchHandler, {
+            // Summer (EDT, UTC-4) and winter (EST, UTC-5) to prove DST is handled,
+            // not a fixed offset.
+            begin: new Date('2026-07-22T10:00:00.000Z'),
+            end: new Date('2026-01-22T10:00:00.000Z'),
+            events: ['failed']
+        });
+
+        client.getBounces.firstCall.args[0].fromDate.should.equal('2026-07-22T06:00:00');
+        client.getBounces.firstCall.args[0].toDate.should.equal('2026-01-22T05:00:00');
+    });
+
     it('dispatches events oldest-first even when Postmark returns pages newest-first', async function () {
         // Simulates Postmark's real (undocumented but conventional) newest-first
         // page order: the first page fetched contains the newer events, the second
